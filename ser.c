@@ -33,6 +33,7 @@ typedef struct
 {
     int m_stop;
     pthread_t *threadid_arr;  //描述线程池的数组
+    pthread_t *thread_work_arr;  //描述线程池的工作线程的数组
     int m_max_requests;  //请求队列允许最大的请求数
     int max_num;         //线程池中线程的最大数目
     int deque_size;      //工作队列的大小
@@ -93,6 +94,11 @@ void Pool_Add_Worker(void *(*Process) (void *arg), void* arg)
     return;
 }
 
+void pthread_pool_delete()
+{
+    printf("pthread is delete 0X%x\n", pthread_self());
+
+}
 
 /*从任务队列中选取任务进行跑*/
 void *Pthread_run(void* arg)
@@ -127,9 +133,10 @@ void *Pthread_run(void* arg)
 
         //调用回调函数
         (*(worker -> Process))(worker -> arg);
+        printf("回调函数调用完毕\n");
         free(worker);
     }
-    // pthread_exit(NULL);
+    pthread_exit(NULL);
 }
 
 
@@ -257,3 +264,10 @@ void main()
     }
 }
 #endif
+
+
+
+
+
+
+
