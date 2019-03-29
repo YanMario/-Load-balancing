@@ -15,12 +15,7 @@
 #include <arpa/inet.h>
 #include <pthread.h>
 #include <sys/select.h>
-
-typedef struct sock
-{
-    int c;
-    int sockfd;
-}sock;
+#include <sys/syscall.h>
 
 typedef struct worker
 {
@@ -33,7 +28,8 @@ typedef struct
 {
     int m_stop;
     pthread_t *threadid_arr;  //描述线程池的数组
-    pthread_t *thread_work_arr;  //描述线程池的工作线程的数组
+    pid_t * thread_idle;     //描述线程池的空闲线程的数组
+    pid_t *thread_work_arr;  //描述线程池的工作线程的数组
     int m_max_requests;  //请求队列允许最大的请求数
     int max_num;         //线程池中线程的最大数目
     int deque_size;      //工作队列的大小
@@ -45,6 +41,9 @@ typedef struct
 }Pthread_pool;
 
 static Pthread_pool* pool = NULL;
+// pool ->  threadid_arr = NULL;
+// pool ->  thread_idle  = NULL;
+// pool ->  thread_work_arr = NULL;
 
 void* Clib_Accept(void *arg);
 void *Pthread_run(void* arg);
@@ -54,6 +53,8 @@ void pool_init(int max_thread_num)
     printf("pool_init\n");
     pool = (Pthread_pool*)malloc(sizeof(Pthread_pool));   //为线程池申请堆上的内存
     pool ->  threadid_arr = (pthread_t*)malloc(sizeof(pthread_t) * max_thread_num);
+    pool ->  thread_idle = (pid_t*)malloc(sizeof(pid_t) * max_thread_num);
+    pool ->  thread_work_arr = (pid_t*)malloc(sizeof(pid_t) * max_thread_num);
     pthread_mutex_init(&(pool -> mutex), NULL);   //互斥锁的初始化
     pthread_cond_init(&(pool -> cond), NULL);
     pool -> list1 = NULL;
@@ -64,6 +65,8 @@ void pool_init(int max_thread_num)
     for(int i = 0; i < pool -> max_num; i++)
     {
         pthread_create(&(pool -> threadid_arr[i]), NULL, Pthread_run, NULL);
+        pool -> thread_idle[i] = getpid();
+//        printf("%d\n", pool -> threadid_arr[i]);
         printf("Pthread_create success\n");
     }
 }
@@ -94,9 +97,37 @@ void Pool_Add_Worker(void *(*Process) (void *arg), void* arg)
     return;
 }
 
-void pthread_pool_delete()
+void pthread_idle_delete(pid_t *arg)
 {
     printf("pthread is delete 0X%x\n", pthread_self());
+    int i = 0;
+    while(i < pool -> max_num)
+    {
+        if(pool -> thread_idle[i] == *arg)
+        {
+            pool -> thread_idle[i] = 0;
+            pool -> thread_work_arr[i] = *arg;
+        }
+        i++;   
+    }
+    return;
+
+}
+
+void pthread_work_arr_delete(pid_t *arg)
+{
+    printf("pthread is delete 0X%x\n", pthread_self());
+    int i = 0;
+    while(i < pool -> max_num)
+    {
+        if(pool -> thread_work_arr[i] == *arg)
+        {
+            pool -> thread_work_arr[i] = 0;
+            pool -> thread_idle[i] = *arg;
+        }
+        i++;   
+    }
+    return;
 
 }
 
@@ -105,38 +136,59 @@ void *Pthread_run(void* arg)
 {
     printf("Pthread_run\n");
     printf ("starting thread 0x%x\n", pthread_self ());
+    // while(1)
+    // {
     while(1)
     {
-        pthread_mutex_lock(&(pool -> mutex));
-        while(pool -> list1_num == 0 && !(pool -> shutdown))
-        {
-            printf ("thread 0x%x is waiting\n", pthread_self ());
-            pthread_cond_wait(&(pool -> cond), &(pool -> mutex));
-        }
-
-        //线程池销毁
-        if(pool -> shutdown)
-        {
-            pthread_mutex_unlock(&(pool -> mutex));
-            printf ("thread 0x%x will exit\n", pthread_self ());
-            pthread_exit(NULL);
-        }
-        printf ("thread 0x%x is starting to work\n", pthread_self ());
-        if(pool -> list1_num == 0 && pool -> list1 == NULL)
-            return NULL;
-
-        //将列表的头任务取出来并且将任务的数目-1
-        Pthread_Worker *worker = pool -> list1;
-        pool -> list1 = worker -> next;
-        pool -> list1_num--;
+    pthread_mutex_lock(&(pool -> mutex));
+    printf ("thread 0x%x is waiting\n", pthread_self ());
+    pthread_cond_wait(&(pool -> cond), &(pool -> mutex));
+    //线程池销毁
+    if(pool -> shutdown)
+    {
         pthread_mutex_unlock(&(pool -> mutex));
-
-        //调用回调函数
-        (*(worker -> Process))(worker -> arg);
-        printf("回调函数调用完毕\n");
-        free(worker);
+        printf ("thread 0x%x will exit\n", pthread_self ());
+        pthread_exit(NULL);
     }
-    pthread_exit(NULL);
+    printf ("thread 0x%x is starting to work\n", pthread_self ());
+    if(pool -> list1_num == 0 && pool -> list1 == NULL)
+        return NULL;
+    //将列表的头任务取出来并且将任务的数目-1
+    Pthread_Worker *worker = pool -> list1;
+    pool -> list1 = worker -> next;
+    pool -> list1_num--;
+    //从空闲队列中删除空闲线程pid
+    pid_t pid = getpid;
+    pthread_idle_delete(&pid);
+    pthread_mutex_unlock(&(pool -> mutex));
+    int* mythis = (int*)(worker -> arg);
+    while(1)
+    {
+        printf("Clib_Accept\n");
+        char buff[256] = {0};
+        //接收客户端消息
+        printf("recv will starting\n");
+        int n = recv(*mythis, buff, 128, 0);
+        printf("recv success\n");
+        printf("n= %d\n", n);
+        if(n <= 0)
+        {
+            //关闭连接
+            close(*mythis);
+            pthread_work_arr_delete(&pid);
+            break;
+        }
+        printf("buff: %s\n", buff);
+        //向客户端发送消息  "👌"，接收成功
+        send(*mythis, "ok", 2, 0);
+    }
+    //调用回调函数
+    // (*(worker -> Process))(worker -> arg);
+    // pthread_work_arr_delete(&pid);
+    // printf("回调函数调用完毕\n");
+    free(worker);
+}
+    // }
 }
 
 
@@ -174,16 +226,16 @@ int pool_destroy ()
     if (pool->shutdown)
         return -1;/*防止两次调用*/
     pool->shutdown = 1;
- 
+
     /*唤醒所有等待线程，线程池要销毁了*/
     pthread_cond_broadcast (&(pool->cond));
- 
+
     /*阻塞等待线程退出，否则就成僵尸了*/
     int i;
     for (i = 0; i < pool->max_num; i++)
         pthread_join (pool->threadid_arr[i], NULL);
     free (pool->threadid_arr);
- 
+
     /*销毁等待队列*/
     Pthread_Worker *head = NULL;
     while (pool->list1 != NULL)
@@ -195,7 +247,7 @@ int pool_destroy ()
     /*条件变量和互斥量也别忘了销毁*/
     pthread_mutex_destroy(&(pool->mutex));
     pthread_cond_destroy(&(pool->cond));
-    
+
     free (pool);
     /*销毁后指针置空是个好习惯*/
     pool=NULL;
@@ -206,6 +258,7 @@ void main()
 {
 
     pool_init(3);
+    int *p = (int*) malloc (sizeof(int)*20);
     /*连续向池中投入10个任务*/
     // int *workingnum = (int *) malloc (sizeof (int) * 10);
     // int i;
@@ -214,12 +267,12 @@ void main()
     //     workingnum[i] = i;
     //     Pool_Add_Worker(Clib_Accept, &workingnum[i]);
     // }
-    
+
     // /*等待所有任务完成*/
     // sleep (5);
     // /*销毁线程池*/
     // pool_destroy();
- 
+
     // free (workingnum);
     // return;
     int sockfd = socket(PF_INET, SOCK_STREAM, 0);  //创建套接字    //不能循环创建套接字吗？
@@ -241,6 +294,7 @@ void main()
     int listen_fd = listen(sockfd, 5);
     if(-1 == listen_fd)
         return;
+    int i = 0;
     while(1)
     {
         int len = sizeof(cli);
@@ -249,25 +303,21 @@ void main()
         int c = accept(sockfd, (struct sockaddr*)&cli, &len);
         if(-1 == c)
             return;
+        p[i] = c;
         // sock *workingname = (sock*)malloc(sizeof(sock));
         // workingname->c = c;
         // workingname->sockfd = sockfd;
-        Pool_Add_Worker(Clib_Accept, &c);
+        Pool_Add_Worker(Clib_Accept, &p[i]);
         printf("添加任务成功\n");
         // free(workingname);
         // sleep (100);
         // 销毁线程池
         // pool_destroy();
-     
+
         // free (workingname);
         // return;
+        i++;
     }
+    free(p);
 }
 #endif
-
-
-
-
-
-
-
